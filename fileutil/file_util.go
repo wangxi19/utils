@@ -2,6 +2,7 @@ package fileutil
 
 import (
 	"bytes"
+	"io"
 	"os"
 )
 
@@ -65,4 +66,55 @@ func WriteFileString(filename string, content string, append bool) (int, error) 
 
 func DeleteFile(filename string) error {
 	return os.Remove(filename)
+}
+
+func CopyFile(filename string, destfilename string) error {
+	fdest, err := os.Create(destfilename)
+
+	if nil != err {
+		return err
+	}
+
+	f, err := os.OpenFile(filename, os.O_RDONLY, 0)
+
+	if nil != err {
+		fdest.Close()
+		return err
+	}
+
+	var buf [1024]byte
+	for {
+		n, err := f.Read(buf[:])
+		if nil != err && io.EOF != err {
+			fdest.Close()
+			f.Close()
+			os.Remove(destfilename)
+			return err
+		}
+
+		_, err2 := fdest.Write(buf[:n])
+
+		if nil != err2 {
+			fdest.Close()
+			f.Close()
+			os.Remove(destfilename)
+			return err2
+		}
+
+		if io.EOF == err {
+			break
+		}
+	}
+
+	fdest.Close()
+	f.Close()
+	return nil
+}
+
+func IOWrite(b []byte, f *os.File) (int, error) {
+	return f.Write(b)
+}
+
+func IOWriteToStdout(b []byte) (int, error) {
+	return IOWrite(b, os.Stdout)
 }
