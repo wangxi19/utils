@@ -7,7 +7,45 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
+	"sync"
 )
+
+type DBPool struct {
+	mDB *sql.DB
+	mMutex sync.Mutex
+	mTimer *time.Timer
+}
+
+func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string) error {
+	db, err := DBOpen(sqltype, username, password, host, port, dbname)
+	if nil != err {
+		return err
+	}
+	this.mDB = db
+	this.mTimer = time.AfterFunc(15 * time.Second, func() {
+		this.Close()
+	})
+	this.mMutex = sync.Mutex{}
+	return nil
+}
+
+func (this *DBPool) GetDB() (*sql.DB, error) {
+	if nil == this.mDB {
+		return nil, errors.New("DB was uninitialed")
+	}
+
+	this.mMutex.Lock()
+	this.mTimer.Reset(15 * time.Second)
+	this.mMutex.Unlock()
+	return this.mDB, nil
+}
+
+func (this *DBPool) Close() {
+	if nil != this.mDB {
+		this.mDB.Close()
+	}
+}
 
 // Note: returning *sql.DB must be close explicitly
 // sqltype: pg only
