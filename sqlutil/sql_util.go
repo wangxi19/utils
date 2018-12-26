@@ -9,19 +9,74 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	//tips
+
 	// _ "github.com/lib/pq"
 )
 
 type DBPool struct {
 	mDBMap    map[string]*sql.DB
-	mMutexMap map[string]sync.Mutex
 	mTimerMap map[string]*time.Timer
-
+	mMutex sync.Mutex
+	
 	mDBInfoMap map[string]map[string]string
 }
 
-func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string) {
-	this.mDBInfoMap = make(map[string]map[string]string)
+//sqltype postgres only, now
+
+func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string, timeoutOpts ...int) error {
+	this.mMutex.Lock()
+	if nil == this.mDBMap {
+		this.mDBMap = make(map[string]*sql.DB)
+	}
+
+	if nil == this.mTimerMap {
+		this.mTimerMap = make(map[string]*time.Timer)
+	}
+	
+	if nil == this.mDBInfoMap {
+		this.mDBInfoMap = make(map[string]map[string]string)
+	}
+	this.mMutex.Unlock()
+
+	var conntimeout int
+	var lifetimeout int
+	if len(timeoutOpts) > 0 {
+		conntimeout = timeoutOpts[0]
+	} else {
+		conntimeout = 30
+	}
+
+	if len(timeoutOpts) > 1 {
+		lifetimeout = timeoutOpts[1]
+	} else {
+		lifetimeout = conntimeout
+	}
+
+	db, err := DBOpen(sqltype, username, password, host, port, dbname, strconv.Itoa(conntimeout))
+	if nil != err {
+		return err
+	}
+	
+	err = db.Ping()
+	if nil != err {
+		return err
+	}
+
+	db.SetConnMaxLifetime(time.Duration(lifetimeout) * time.Second)
+	db.SetMaxIdleConns(2)
+	//unlimited conn number
+	db.SetMaxOpenConns(-1)
+
+	this.mMutex.Lock()
+
+	this.mDBMap[dbname] = db
+
+	this.mTimerMap[dbname] = time.AfterFunc(3 * time.Minute, func () {
+		this.Close(dbname)
+	})
+
 	var dbInfo map[string]string
 	dbInfo["sqltype"] = sqltype
 	dbInfo["username"] = username
@@ -29,32 +84,77 @@ func (this *DBPool) InitDB(sqltype string, username string, password string, hos
 	dbInfo["host"] = host
 	dbInfo["port"] = port
 	dbInfo["dbname"] = dbname
+	dbInfo["conntimeout"] = strconv.Itoa(conntimeout)
+	dbInfo["lifetimeout"] = strconv.Itoa(lifetimeout)
+	dbInfo["status"] = "active"
 
 	this.mDBInfoMap[dbname] = dbInfo
 
+	this.mMutex.Unlock()
+
+	return nil
 }
 
 func (this *DBPool) GetDB(dbname string) (*sql.DB, error) {
-	_, ok := this.mDBInfoMap[dbname]
+	this.mMutex.Lock()
+
+	infoMap, ok := this.mDBInfoMap[dbname]
 	if !ok {
+		this.mMutex.Unlock()
 		return nil, errors.New("Uninitialed database, please call InitDB firstly")
 	}
 
-	//to do
+	db := this.mDBMap[dbname]
+	this.mMutex.Unlock()
 
-	// db, ok := this.mDBMap[dbname]
-	// if !ok {
-	// 	db, err := DBOpen(this.mDBInfoMap[dbname]["sqltype"], this.mDBInfoMap[dbname]["username"], this.mDBInfoMap[dbname]["password"], this.mDBInfoMap[dbname]["host"], this.mDBInfoMap[dbname]["port"], this.mDBInfoMap[dbname]["dbname"])
-	// 	if nil != err {
-	// 		return nil, err
-	// 	}
-	// }
+	err := db.Ping()
+	if nil != err {
+		if "closed" != infoMap["status"] {
+			err = db.Close()
+			if nil != err {
+				//to do
+			}
+		}
 
-	return nil, nil
+		db, err = DBOpen(infoMap["sqltype"], infoMap["username"], infoMap["password"], infoMap["host"], infoMap["port"], infoMap["dbname"], infoMap["conntimeout"])
+		if nil != err {
+			this.Remove(dbname)
+			return nil, err
+		}
+
+		lifetimeout, _ := strconv.Atoi(infoMap["lifetimeout"])
+		db.SetConnMaxLifetime(time.Duration(lifetimeout) * time.Second)
+	}
+
+	this.mMutex.Lock()
+	this.mTimerMap[dbname].Reset(3 * time.Minute)
+	this.mMutex.Unlock()
+
+	return db, nil
 }
 
-func (this *DBPool) Close() {
+func (this *DBPool) Remove(dbname string) (bool, error) {
+	this.mMutex.Lock()
+	delete(this.mDBInfoMap, dbname)
+	db := this.mDBMap[dbname]
+	delete(this.mDBMap, dbname)
+	timer := this.mTimerMap[dbname]
+	delete(this.mTimerMap, dbname)
+	this.mMutex.Unlock()
 
+	err := db.Close()
+	ok := timer.Stop()
+
+	return ok, err
+}
+
+func (this *DBPool) Close(dbname string) (bool, error) {
+	this.mMutex.Lock()
+	defer this.mMutex.Unlock()
+	
+	ok := this.mTimerMap[dbname].Stop()
+	err := this.mDBMap[dbname].Close()
+	return ok, err
 }
 
 // Note: returning *sql.DB must be close explicitly
