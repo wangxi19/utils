@@ -12,7 +12,7 @@ import (
 
 	//tips
 
-	// _ "github.com/lib/pq"
+	_ "github.com/lib/pq"
 )
 
 type DBPool struct {
@@ -23,6 +23,9 @@ type DBPool struct {
 	mDBInfoMap map[string]map[string]string
 }
 
+const (
+	dbconndeadline = 3
+)
 //sqltype postgres only, now
 
 func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string, timeoutOpts ...int) error {
@@ -73,11 +76,11 @@ func (this *DBPool) InitDB(sqltype string, username string, password string, hos
 
 	this.mDBMap[dbname] = db
 
-	this.mTimerMap[dbname] = time.AfterFunc(3 * time.Minute, func () {
+	this.mTimerMap[dbname] = time.AfterFunc(time.Duration(dbconndeadline) * time.Minute, func () {
 		this.Close(dbname)
 	})
 
-	var dbInfo map[string]string
+	dbInfo := map[string]string{}
 	dbInfo["sqltype"] = sqltype
 	dbInfo["username"] = username
 	dbInfo["password"] = password
@@ -96,16 +99,15 @@ func (this *DBPool) InitDB(sqltype string, username string, password string, hos
 }
 
 func (this *DBPool) GetDB(dbname string) (*sql.DB, error) {
+	defer this.mMutex.Unlock()
 	this.mMutex.Lock()
 
 	infoMap, ok := this.mDBInfoMap[dbname]
 	if !ok {
-		this.mMutex.Unlock()
 		return nil, errors.New("Uninitialed database, please call InitDB firstly")
 	}
 
 	db := this.mDBMap[dbname]
-	this.mMutex.Unlock()
 
 	err := db.Ping()
 	if nil != err {
@@ -118,7 +120,7 @@ func (this *DBPool) GetDB(dbname string) (*sql.DB, error) {
 
 		db, err = DBOpen(infoMap["sqltype"], infoMap["username"], infoMap["password"], infoMap["host"], infoMap["port"], infoMap["dbname"], infoMap["conntimeout"])
 		if nil != err {
-			this.Remove(dbname)
+			this.remove(dbname)
 			return nil, err
 		}
 
@@ -126,21 +128,24 @@ func (this *DBPool) GetDB(dbname string) (*sql.DB, error) {
 		db.SetConnMaxLifetime(time.Duration(lifetimeout) * time.Second)
 	}
 
-	this.mMutex.Lock()
-	this.mTimerMap[dbname].Reset(3 * time.Minute)
-	this.mMutex.Unlock()
+	this.mTimerMap[dbname].Reset(time.Duration(dbconndeadline) * time.Minute)
 
 	return db, nil
 }
 
 func (this *DBPool) Remove(dbname string) (bool, error) {
 	this.mMutex.Lock()
+	defer this.mMutex.Unlock()
+
+	return this.remove(dbname)
+}
+
+func (this *DBPool) remove(dbname string) (bool, error) {
 	delete(this.mDBInfoMap, dbname)
 	db := this.mDBMap[dbname]
 	delete(this.mDBMap, dbname)
 	timer := this.mTimerMap[dbname]
 	delete(this.mTimerMap, dbname)
-	this.mMutex.Unlock()
 
 	err := db.Close()
 	ok := timer.Stop()
@@ -152,8 +157,13 @@ func (this *DBPool) Close(dbname string) (bool, error) {
 	this.mMutex.Lock()
 	defer this.mMutex.Unlock()
 	
+	mp := this.mDBInfoMap[dbname]
+	mp["status"] = "closed"
+	this.mDBInfoMap[dbname] = mp
 	ok := this.mTimerMap[dbname].Stop()
 	err := this.mDBMap[dbname].Close()
+
+	fmt.Println("DB: ", dbname, " has been closed")
 	return ok, err
 }
 
