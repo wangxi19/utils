@@ -7,50 +7,60 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
+	"time"
+	// _ "github.com/lib/pq"
 )
 
 type DBPool struct {
-	mDB *sql.DB
-	mMutex sync.Mutex
-	mTimer *time.Timer
+	mDBMap    map[string]*sql.DB
+	mMutexMap map[string]sync.Mutex
+	mTimerMap map[string]*time.Timer
+
+	mDBInfoMap map[string]map[string]string
 }
 
-func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string) error {
-	db, err := DBOpen(sqltype, username, password, host, port, dbname)
-	if nil != err {
-		return err
-	}
-	this.mDB = db
-	this.mTimer = time.AfterFunc(15 * time.Second, func() {
-		this.Close()
-	})
-	this.mMutex = sync.Mutex{}
-	return nil
+func (this *DBPool) InitDB(sqltype string, username string, password string, host string, port string, dbname string) {
+	this.mDBInfoMap = make(map[string]map[string]string)
+	var dbInfo map[string]string
+	dbInfo["sqltype"] = sqltype
+	dbInfo["username"] = username
+	dbInfo["password"] = password
+	dbInfo["host"] = host
+	dbInfo["port"] = port
+	dbInfo["dbname"] = dbname
+
+	this.mDBInfoMap[dbname] = dbInfo
+
 }
 
-func (this *DBPool) GetDB() (*sql.DB, error) {
-	if nil == this.mDB {
-		return nil, errors.New("DB was uninitialed")
+func (this *DBPool) GetDB(dbname string) (*sql.DB, error) {
+	_, ok := this.mDBInfoMap[dbname]
+	if !ok {
+		return nil, errors.New("Uninitialed database, please call InitDB firstly")
 	}
 
-	this.mMutex.Lock()
-	this.mTimer.Reset(15 * time.Second)
-	this.mMutex.Unlock()
-	return this.mDB, nil
+	//to do
+
+	// db, ok := this.mDBMap[dbname]
+	// if !ok {
+	// 	db, err := DBOpen(this.mDBInfoMap[dbname]["sqltype"], this.mDBInfoMap[dbname]["username"], this.mDBInfoMap[dbname]["password"], this.mDBInfoMap[dbname]["host"], this.mDBInfoMap[dbname]["port"], this.mDBInfoMap[dbname]["dbname"])
+	// 	if nil != err {
+	// 		return nil, err
+	// 	}
+	// }
+
+	return nil, nil
 }
 
 func (this *DBPool) Close() {
-	if nil != this.mDB {
-		this.mDB.Close()
-	}
+
 }
 
 // Note: returning *sql.DB must be close explicitly
 // sqltype: pg only
-func DBOpen(sqltype string, username string, password string, host string, port string, dbname string) (*sql.DB, error) {
-	dbInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable", host, port, username, password, dbname)
+func DBOpen(sqltype string, username string, password string, host string, port string, dbname string, conntimeout string) (*sql.DB, error) {
+	dbInfo := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s connect_timeout=%s sslmode=disable", host, port, username, password, dbname, conntimeout)
 
 	return sql.Open(sqltype, dbInfo)
 }
@@ -220,9 +230,7 @@ func SelectArrayMap(query interface{}, tbName string, fields interface{}, where 
 		queryStr += ` LIMIT ` + strconv.Itoa(limit)
 	}
 
-	if -1 != limit && -1 != offset {
-		queryStr += ` , OFFSET ` + strconv.Itoa(offset)
-	} else if -1 != offset {
+	if -1 != offset {
 		queryStr += ` OFFSET ` + strconv.Itoa(offset)
 	}
 
